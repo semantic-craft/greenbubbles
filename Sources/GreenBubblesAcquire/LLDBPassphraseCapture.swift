@@ -4,6 +4,7 @@ import Darwin
 import Foundation
 
 public enum CaptureError: Error, Equatable, CustomStringConvertible {
+  case verifierRequired
   case lldbUnavailable
   case lldbLaunchFailed
   case attachFailed(String)
@@ -14,6 +15,8 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
 
   public var description: String {
     switch self {
+    case .verifierRequired:
+      return "A database candidate verifier is required before capture"
     case .lldbUnavailable:
       return "lldb is not available; install the Xcode Command Line Tools"
     case .lldbLaunchFailed:
@@ -40,7 +43,8 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
 /// The lldb script is written to a stdin pipe that stays open for the whole
 /// capture window (lldb must not see EOF while it waits for the breakpoint).
 /// stdout and stderr are accumulated incrementally and re-parsed after every
-/// chunk; the loop stops at the first parseable passphrase or at the timeout.
+/// chunk; each candidate is verified while the target is stopped; rejected candidates
+/// resume capture within the same deadline.
 /// Only the child process spawned here is ever terminated — never `pkill`.
 ///
 /// Diagnostics the original Python tool lacks: an attach failure fails fast
@@ -67,6 +71,9 @@ public struct LLDBPassphraseCapture: Sendable {
   /// Mirrors lldb's raw output through `outputHandler` (lines may be split
   /// arbitrarily; intended for diagnosing a stalled capture).
   public var verbose = false
+
+  /// Required database verifier. False resumes capture; errors abort without saving.
+  public var candidateValidator: (@Sendable (PassphraseSecret) throws -> Bool)?
 
   private func emit(_ message: String) {
     outputHandler?(message)
@@ -103,11 +110,12 @@ public struct LLDBPassphraseCapture: Sendable {
     }
   }
 
-  private func runSingleCapture(
+  func runSingleCapture(
     processID: pid_t,
     architecture: LLDBTargetArchitecture,
     deadline: Date
   ) throws -> PassphraseSecret {
+    guard let candidateValidator else { throw CaptureError.verifierRequired }
     let script = LLDBCaptureScript.script(processID: processID, architecture: architecture)
 
     let process = Process()
@@ -140,11 +148,11 @@ public struct LLDBPassphraseCapture: Sendable {
     defer {
       output.fileHandleForReading.readabilityHandler = nil
       verboseRelay?.flush()
-      // Only ever terminate the child spawned here. On a successful capture the
-      // script has already detached and quit; otherwise terminating lldb
-      // detaches the target.
+      // Ask LLDB to detach before terminating only our child. No global kill.
       if process.isRunning {
-        process.terminate()
+        input.fileHandleForWriting.write(Data("process detach\nquit\n".utf8))
+      }
+      if process.isRunning {
         let graceDeadline = Date().addingTimeInterval(3)
         while process.isRunning, Date() < graceDeadline {
           Thread.sleep(forTimeInterval: 0.05)
@@ -160,35 +168,31 @@ public struct LLDBPassphraseCapture: Sendable {
     // it waits for the breakpoint to hit.
     input.fileHandleForWriting.write(Data(script.utf8))
 
-    var reportedAttachFailure = false
     while Date() < deadline {
+      if !process.isRunning {
+        // Allow the pipe reader to drain the debugger's final chunk.
+        Thread.sleep(forTimeInterval: 0.1)
+      }
       let current = accumulator.current()
       if let captured = LLDBOutputParser.parsePassphrase(from: current) {
-        return try Self.makeSecret(consuming: captured)
+        let candidate = try Self.makeSecret(consuming: captured)
+        if try candidateValidator(candidate) {
+          return candidate
+        }
+        emit("candidate rejected by database verification; continuing capture")
+        accumulator.clear()
+        guard process.isRunning else { throw CaptureError.exitedWithoutCapture }
+        input.fileHandleForWriting.write(Data("process continue\n".utf8))
+        continue
       }
-      if !reportedAttachFailure, let detail = LLDBOutputParser.detectAttachFailure(in: current) {
-        reportedAttachFailure = true
+      if let detail = LLDBOutputParser.detectAttachFailure(in: current) {
         emit("lldb reported: \(detail)")
         throw CaptureError.attachFailed(detail)
       }
       if LLDBOutputParser.detectTargetExit(in: current) {
         throw CaptureError.targetExited
       }
-      if !process.isRunning {
-        // Give the readability handler a moment to flush the final output.
-        Thread.sleep(forTimeInterval: 0.1)
-        let final = accumulator.current()
-        if let captured = LLDBOutputParser.parsePassphrase(from: final) {
-          return try Self.makeSecret(consuming: captured)
-        }
-        if let detail = LLDBOutputParser.detectAttachFailure(in: final) {
-          throw CaptureError.attachFailed(detail)
-        }
-        if LLDBOutputParser.detectTargetExit(in: final) {
-          throw CaptureError.targetExited
-        }
-        throw CaptureError.exitedWithoutCapture
-      }
+      if !process.isRunning { throw CaptureError.exitedWithoutCapture }
       Thread.sleep(forTimeInterval: 0.05)
     }
     throw CaptureError.timedOut
@@ -207,6 +211,12 @@ public struct LLDBPassphraseCapture: Sendable {
     func append(_ data: Data) {
       lock.lock()
       buffer.append(String(decoding: data, as: UTF8.self))
+      lock.unlock()
+    }
+
+    func clear() {
+      lock.lock()
+      buffer = ""
       lock.unlock()
     }
 

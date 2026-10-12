@@ -8,62 +8,46 @@ The [README](../README.md#getting-your-database-key) has the short version.
 
 ![Account key capture and per-database key derivation](../assets/key-flow.svg)
 
-## Before you start
+## Preserve the primary WeChat installation
 
-- **You need administrator access.** The capture step runs with `sudo`.
-- **You will re-sign your copy of WeChat.** This replaces Apple's security
-  signature on WeChat with a local one, so the capture tool is allowed to
-  attach to it. WeChat keeps working normally. When WeChat updates, it gets its
-  original signature back, and you re-sign it again only if you need to capture
-  the key again.
-- **You will log out of WeChat and log back in** during the capture.
-- **The key cannot be changed.** It opens every copy of your WeChat data,
-  including old backups. The tool saves it in a file only your account can
-  read. Keep it that way, and never paste it into an AI prompt, an issue, or a
-  chat.
+Do not re-sign `/Applications/WeChat.app` as a setup step in this fork.
+A live attempt with WeChat 4.1.15 failed to launch after deep ad-hoc signing;
+the official vendor-signed application had to be restored. Do not disable
+SIP, library validation, or other system protections to make capture work.
 
-## Steps
+The current reader accepts an already acquired, database-verified key without
+changing the application. The capture implementation still needs debugger
+access and a fresh login. A protected official client is therefore a blocker,
+not an instruction to modify its signature. A root-only task-port probe can
+check access without reading memory, stopping the app, or setting breakpoints;
+a successful probe alone does not prove acquisition works. On the restored
+official WeChat 4.1.15 build 270134, both ordinary-user and root probes
+returned `KERN_FAILURE` (5). The root report confirmed `memoryRead: false`
+and `targetPaused: false`; the official signature still passed deep strict
+verification and the same client process remained running. Repeating the
+probe with administrator privileges is not a remedy for this observed blocker.
 
-1. **Start WeChat and log in.**
+No isolated-copy acquisition procedure is accepted yet. A copied executable
+can still share an account container with the main application; copying it
+alone does not isolate user data. Validate application and data isolation,
+process selection, secret handling, and restoration before asking an owner
+to log in to an alternate client.
 
-2. **Check that everything is ready:**
+## With an existing key
 
-   ```sh
-   greenbubbles-acquire preflight
-   ```
+Run `greenbubbles-acquire verify --passphrase-stdin --json` with the owner-only
+key file redirected to stdin. Require `allVerified: true` before bounded
+message-read acceptance. Never print or paste the key. Verification does not
+change WeChat or prove history/media completeness.
 
-   It prints a checklist and says `Ready to capture.` when nothing is missing.
-   If something is wrong, it prints how to fix it. Common fixes:
+## Capture in an independently validated environment
 
-   - `lldb is not available`: install Apple's developer tools with
-     `xcode-select --install`.
-   - `Hardened Runtime is still active`: re-sign WeChat (next step).
-   - `not running as root`: expected for this check. The capture itself runs
-     with `sudo`.
-
-3. **Re-sign WeChat, then quit and restart it.** Run this yourself;
-   GreenBubbles never runs it for you:
-
-   ```sh
-   sudo codesign --force --deep --sign - /Applications/WeChat.app
-   ```
-
-4. **Start the capture:**
-
-   ```sh
-   sudo greenbubbles-acquire capture
-   ```
-
-5. **In WeChat, log out of your account (don't just quit the app), then log
-   back in.** You have 5 minutes by default.
-
-When the login finishes, the tool checks the key against your databases and
-saves it to `~/.greenbubbles-acquire/passphrase.txt`. Now you can run ordinary
-commands with no extra setup:
-
-```sh
-greenbubbles chats --limit 20
-```
+`greenbubbles-acquire preflight` reports whether the current process can use
+the existing capture path. When blocked, stop; no signing operation is part
+of the CLI. When acquisition has independently been made safe, the owner
+starts `capture`, waits for the attach event, then handles logout/login.
+Candidates are verified before being written to a private file. A successful
+capture must still be followed by full `verify` and a bounded reader check.
 
 ## Command options
 
@@ -91,19 +75,36 @@ greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
 The WeChat version is shown for information only. The tool does not refuse a
 version it hasn't seen, but it has only been tested on WeChat 4.1.12 and 4.1.13.
 
+## Candidate validation
+
+The capture breakpoint filters for SQLCipher 4 PBKDF2 parameters (32-byte
+password, 16-byte salt, SHA512, 256000 rounds). A parameter match is only a
+candidate: the capture loop verifies it against the inventoried database
+page-1 HMACs before detaching. A rejected candidate resumes the process and
+continues within the original timeout, including across process restarts.
+No unverified candidate is saved. Final verification still reports how many
+inventoried salts were covered; use `verify` to require complete coverage.
+
+This addresses the premature-candidate failure described in upstream issue
+#20. Automated process-loop and cryptographic tests do not establish live
+compatibility with every WeChat 4.1.15 build. A real capture, full inventory
+verification, and bounded message read remain the acceptance steps for each
+new environment. The 4.1.15 observation below used the unmodified upstream
+capture executable; it does not validate this fork's changed capture loop.
+
 ## If something goes wrong
 
 The capture never saves a key it could not verify. If anything fails, you are
 left with no key file rather than a wrong one.
 
-- **"Hardened Runtime is still active":** you haven't re-signed WeChat, or you
-  didn't restart it after re-signing. macOS blocks the attach.
+- **"Hardened Runtime is still active":** debugger access is blocked. Preserve
+  the official application; do not re-sign it as a workaround.
 - **Timed out:** you didn't log out and back in within the time limit. Run
   `capture` again. An idle, logged-in WeChat never reveals the key.
 - **Verification failed:** the captured value didn't open your databases, so
   nothing was saved. Check that you logged back into the same account.
-- **WeChat updated:** re-sign it and restart it before capturing again. A key
-  you already saved keeps working as long as `verify` succeeds.
+- **WeChat updated:** verify any existing key before attempting acquisition.
+  Keep the updated official application intact.
 
 ## Where the key is saved
 
@@ -165,6 +166,23 @@ GreenBubbles features that don't read live WeChat data, such as opening an
 existing backup, never use this capture.
 
 ## What has been tested
+
+- **2026-10-12, WeChat 4.1.15 build 270134, macOS 27.0.1:** an owner-operated
+  comparison captured a passphrase in about 14.5 seconds from a temporary
+  deep ad-hoc-signed application copy, using unmodified upstream acquisition
+  at `69f19c7`. All 20 inventoried databases verified, and the reader returned
+  a bounded conversation page. Subsequent verification still passed 20/20;
+  a bounded sample returned three actual messages from one conversation.
+  Conversation listing reported `contactDisplayNameUnresolved`, so display
+  name coverage is not complete. The official primary application's deep
+  strict signature verification passed. The owner subsequently confirmed
+  that the official application was signed in and usable; verification still
+  passed 20/20 with that application running. The temporary
+  copy shared the existing account container; it was not a data-isolated
+  environment. The earlier launch failure's root cause remains unproven.
+  In the same comparison, wx-cli-again at `077a54c` acquired one database key,
+  reported six missing critical shards, and failed to decrypt `session.db`.
+  Its successful init/doctor exit codes did not establish reader readiness.
 
 - **2026-08-27, WeChat 4.1.12:** a test with made-up data reproduced the read
   and key computation exactly. Then a real capture on the author's own Mac and
