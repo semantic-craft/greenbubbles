@@ -7,15 +7,17 @@ limitation."
 
 ### I don't have the database key. Can I use this at all?
 
-Yes, once you capture it. Capturing copies the key from your own WeChat app:
+Yes, with a key that has been independently verified against your account's
+local databases. This fork does **not** instruct you to re-sign the official
+`/Applications/WeChat.app`: a previous attempt prevented it from launching.
+A protected official client blocks the current debugger-based capture path.
+Do not disable system protections or retry signing the primary application.
 
-1. Re-sign your copy of WeChat so a debugger is allowed to attach.
-2. Run `greenbubbles-acquire preflight` to check you're ready.
-3. Run `sudo greenbubbles-acquire capture`, then log out of WeChat and back in.
-
-The tool checks the key against every database and saves it to a file only you
-can read. This needs administrator access. Step-by-step:
-[key setup guide](PASSPHRASE_ACQUISITION.md).
+A copied application may still share the original account container. An
+application-and-data-isolated acquisition procedure has not yet passed live
+acceptance. Preserve the working client and follow the
+[key setup guide](PASSPHRASE_ACQUISITION.md) for prerequisites and evidence.
+Capture requires owner participation; ordinary reads with an existing key do not.
 
 GreenBubbles doesn't break WeChat's encryption and never will; it reads the key
 from your own app. If you'd rather not capture it, you can still open a backup
@@ -23,18 +25,22 @@ someone already made for you, or data that is already unencrypted.
 
 ### Do I need a profile or a folder path?
 
-Not for your live WeChat data. After capture, `greenbubbles chats` finds the
-WeChat account you're using and reads the key from
-`~/.greenbubbles-acquire/passphrase.txt`.
+A single-account installation can use the ordinary settings. For switching
+accounts on the same Mac, register a separate verified key and source root for
+each account in private [profiles](QUERY_PROFILES.md), and opt into
+`[source] follow_active_account = true`. Do not combine this mode with a pinned
+source or default profile. See [account switching](AI_CONTEXT_CLI.md#switching-logged-in-accounts-on-one-mac).
 
-- Old account folders left behind after switching accounts are ignored.
-- If two accounts were both used in the last 14 days, GreenBubbles won't guess.
-  Set `source.root` in `~/.greenbubbles/config.toml` to the one you want.
-- To use a different key file, set `source.passphrase_file` in the same file.
-- If the key file is missing, you get an `invalidProfile` error with a plain
-  explanation. It never prints the path or the key.
+Active-account mode selects the uniquely registered account whose databases the
+running official WeChat process has open. Unknown or ambiguous accounts fail
+with `activeAccountUnavailable`; there is no timestamp or previous-account
+fallback. An explicit `--profile` deliberately reads that account's local
+history, even when another account is logged in.
 
-You need a [profile](QUERY_PROFILES.md) only for a second account or a backup.
+Without active-account mode, automatic discovery uses database modification
+times and refuses recently active multiple accounts. A pinned `source.root`
+remains pinned when WeChat switches accounts. Source inventory or profile
+validation alone does not prove that a key decrypts the current account.
 
 ### Which folder holds my WeChat data?
 
@@ -191,7 +197,7 @@ outside GreenBubbles' control; deciding whether to trust it is up to you.
 
 Reading never contacts WeChat's servers, injects code, or uses WeChat's private
 interfaces, so there's nothing for WeChat to notice. Capturing the key is
-different: it re-signs WeChat and needs a logout and login, which WeChat can
+different: it needs debugger access and a logout and login, which WeChat can
 obviously see. See the [threat model](THREAT_MODEL.md).
 
 ### What about the other people in my chats?
