@@ -24,7 +24,7 @@ enum CLIError: Error, CustomStringConvertible {
     case .invalidInteger(let option, let value):
       return "Expected a positive integer for \(option), got: \(value)"
     case .noDatabaseRootDiscovered:
-      return "No WeChat database root was discovered; pass --db-root to select one"
+      return "No unique WeChat database root was discovered; pass --db-root to select one"
     case .verificationFailed(let reason):
       return "Passphrase verification failed: \(reason)"
     }
@@ -40,6 +40,9 @@ struct Arguments {
   }
 
   var command: Command = .help
+  var processID: pid_t?
+  var executablePath: URL?
+  var uid: uid_t?
   var output: URL?
   var timeoutSeconds = LLDBPassphraseCapture.defaultTimeoutSeconds
   var dbRoot: URL?
@@ -63,6 +66,25 @@ struct Arguments {
     while index < arguments.count {
       let option = arguments[index]
       switch option {
+      case "--pid", "--uid":
+        index += 1
+        guard index < arguments.count else { throw CLIError.missingValue(option) }
+        let value = arguments[index]
+        if option == "--pid" {
+          guard let number = pid_t(value), number > 0 else {
+            throw CLIError.invalidInteger(option: option, value: value)
+          }
+          processID = number
+        } else {
+          guard let number = uid_t(value) else {
+            throw CLIError.invalidInteger(option: option, value: value)
+          }
+          uid = number
+        }
+      case "--executable-path":
+        index += 1
+        guard index < arguments.count else { throw CLIError.missingValue(option) }
+        executablePath = URL(fileURLWithPath: arguments[index])
       case "--output":
         index += 1
         guard index < arguments.count else { throw CLIError.missingValue(option) }
@@ -117,23 +139,24 @@ private let usage = """
     help                   Show this help
 
   Options:
-    --output <path>        Where capture writes the passphrase (default:
-                           ~/.greenbubbles-acquire/passphrase.txt, mode 0600)
+    --pid <n>             Explicit capture/preflight process (required)
+    --executable-path <p> Expected executable path (required for capture/preflight)
+    --uid <n>             Expected process owner (defaults to invoking user)
+    --output <path>        Capture destination (required, mode 0600)
     --timeout-seconds <n>  Capture window in seconds (default: 300)
-    --db-root <path>       Override the auto-discovered active db_storage root
+    --db-root <path>       Explicit db_storage root (required for capture/preflight)
     --overwrite            Replace an existing passphrase output file
     --passphrase-stdin     Read the 32-byte passphrase from standard input
     --include-paths        Include sensitive filesystem paths in local output
     --json                 Emit machine-readable JSON instead of human-readable text
-    --verbose              Mirror lldb output during capture (for diagnosing stalls)
+    --verbose              Report debugger output activity without relaying raw text
     -h, --help             Show this help
 
-  Capture requires root, lldb, a running WeChat, and an owner re-signed client
-  without Hardened Runtime. When re-signing is required, preflight prints the
-  exact command for the owner to run manually; this tool never automates it.
-  The capture mechanism breakpoints a system library function, so it works
-  with any WeChat build; the active account's database root is discovered
-  automatically.
+  Capture requires an explicit process, executable, owner, and open database root.
+  It never reselects a target after exit. Unknown hardening or source identity blocks
+  capture. Preserve the official WeChat app; a separate acquisition environment
+  still needs independent isolation and compatibility validation. Never re-sign
+  the primary app. No isolated WeChat acquisition procedure is accepted yet.
   """
 
 private struct PreflightReport: Encodable {
@@ -212,7 +235,7 @@ private func printPreflight(_ result: PreflightResult) {
   let failed = result.checks.filter { !$0.ok }.count
   if result.report.ready {
     print("Ready to capture.")
-    print("Next: sudo greenbubbles-acquire capture")
+    print("Next: capture using the same explicit target options and a separate --output path")
   } else {
     print("Not ready — \(failed) \(failed == 1 ? "problem" : "problems") to fix (see above).")
   }
@@ -237,42 +260,30 @@ private func resolveDatabaseRoot(_ option: URL?) throws -> URL {
     .databaseRoots()
   if roots.count == 1 { return roots[0] }
   if roots.isEmpty { throw CLIError.noDatabaseRootDiscovered }
-  // Several accounts are present: the running client is logged into exactly
-  // one, and that account's databases are the ones being written to.
-  guard
-    let active = roots.max(by: { latestDatabaseModification($0) < latestDatabaseModification($1) })
-  else {
-    throw CLIError.noDatabaseRootDiscovered
-  }
-  return active
+  // An offline verification must not guess between accounts by modification time.
+  throw CLIError.noDatabaseRootDiscovered
 }
 
-private func latestDatabaseModification(_ root: URL) -> Date {
-  var latest = Date.distantPast
-  guard
-    let enumerator = FileManager.default.enumerator(
-      at: root,
-      includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey],
-      options: [.skipsHiddenFiles]
-    )
-  else { return latest }
-  for case let url as URL in enumerator {
-    guard url.pathExtension == "db", !url.lastPathComponent.hasSuffix("-wal"),
-      !url.lastPathComponent.hasSuffix("-shm")
-    else { continue }
-    guard
-      let values = try? url.resourceValues(forKeys: [
-        .contentModificationDateKey, .isRegularFileKey,
-      ]),
-      values.isRegularFile == true,
-      let modified = values.contentModificationDate
-    else { continue }
-    if modified > latest { latest = modified }
+private func resolveTarget(_ arguments: Arguments) throws -> ProcessTargetBinding {
+  guard let processID = arguments.processID else { throw CLIError.missingRequiredOption("--pid") }
+  guard let executablePath = arguments.executablePath else {
+    throw CLIError.missingRequiredOption("--executable-path")
   }
-  return latest
+  guard let root = arguments.dbRoot else { throw CLIError.missingRequiredOption("--db-root") }
+  let invokingUID: uid_t
+  if geteuid() == 0, let value = ProcessInfo.processInfo.environment["SUDO_UID"],
+    let sudoUID = uid_t(value)
+  {
+    invokingUID = sudoUID
+  } else {
+    invokingUID = getuid()
+  }
+  return try ProcessTargetBinding(
+    processID: processID, executablePath: executablePath,
+    uid: arguments.uid ?? invokingUID, databaseRoot: root)
 }
 
-private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightResult {
+private func runPreflight(binding: ProcessTargetBinding, includePaths: Bool) -> PreflightResult {
   var checks: [PreflightCheck] = []
   var remediation: String?
 
@@ -292,15 +303,15 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
       hint: runningAsRoot ? nil : "capture needs to attach to WeChat; re-run with sudo"
     ))
 
-  // The capture mechanism breakpoints a system CommonCrypto symbol, so it is
-  // build-agnostic: client version and signing state are reported for the
-  // owner's information only and never gate the capture.
+  // Inspect the selected application, not another default installation.
   var clientInstalled = false
   var clientReSigned = false
   var clientMarketingVersion: String?
   var clientBuildVersion: String?
   let buildInspector = WeChatClientBuildInspector(homeDirectory: invokingUserHomeDirectory())
-  if let application = buildInspector.defaultApplicationURL() {
+  let application = binding.executablePath.deletingLastPathComponent()
+    .deletingLastPathComponent().deletingLastPathComponent()
+  if FileManager.default.isExecutableFile(atPath: binding.executablePath.path) {
     clientInstalled = true
     if let build = try? buildInspector.inspect(application: application) {
       clientMarketingVersion = build.marketingVersion
@@ -319,9 +330,9 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
   var processHardeningStatus: ProcessHardeningStatus? = nil
   var processLabel = "WeChat is not running"
   var processHint: String? = "start WeChat and log in before capturing"
-  if let processIDs = try? WeChatProcessLocator().processIDs(), let first = processIDs.first {
+  do {
     wechatProcessRunning = true
-    let status = RuntimeHardeningProbe.status(forProcessID: first)
+    let status = RuntimeHardeningProbe.status(forProcessID: binding.processID)
     processHardeningStatus = status
     let version = [clientMarketingVersion, clientBuildVersion.map { "build \($0)" }]
       .compactMap { $0 }.joined(separator: ", ")
@@ -335,13 +346,13 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
       processLabel = "WeChat is running\(suffix), Hardened Runtime removed"
       processHint = nil
     case .unknown:
-      processLabel = "WeChat is running\(suffix), hardening status unknown (proceeding)"
-      processHint = nil
+      processLabel = "WeChat is running\(suffix), hardening status unknown (blocked)"
+      processHint = "Cannot confirm capture readiness; preserve the client"
     }
   }
   checks.append(
     PreflightCheck(
-      ok: wechatProcessRunning && processHardeningStatus != .hardened,
+      ok: wechatProcessRunning && processHardeningStatus == .notHardened,
       label: processLabel,
       hint: processHint
     ))
@@ -353,12 +364,13 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
   var databaseHint: String? = "log into WeChat once so it creates its databases"
   var databasesOK = false
   do {
-    let root = try resolveDatabaseRoot(dbRootOption)
+    try binding.assertStillBound()
+    let root = binding.databaseRoot
     databaseRootReference = PathPrivacy(includePaths: includePaths).reference(for: root)
     let inventory = try DatabaseSaltInventory(root: root)
     databaseCount = inventory.entries.count
     distinctSaltCount = inventory.distinctSalts.count
-    let origin = dbRootOption == nil ? "auto-discovered" : "from --db-root"
+    let origin = "bound to the selected process"
     if inventory.entries.isEmpty {
       databaseLabel = "database root found (\(origin)) but it contains no databases"
     } else {
@@ -391,7 +403,7 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
     clientMarketingVersion: clientMarketingVersion,
     clientBuildVersion: clientBuildVersion,
     databaseRoot: databaseRootReference,
-    databaseRootAutoDiscovered: dbRootOption == nil,
+    databaseRootAutoDiscovered: false,
     databaseCount: databaseCount,
     distinctSaltCount: distinctSaltCount
   )
@@ -424,8 +436,9 @@ do {
   case .help:
     print(usage)
   case .preflight:
+    let binding = try resolveTarget(arguments)
     let result = runPreflight(
-      dbRootOption: arguments.dbRoot,
+      binding: binding,
       includePaths: arguments.includePaths
     )
     if arguments.json {
@@ -435,13 +448,10 @@ do {
     }
     if !result.report.ready { exit(1) }
   case .capture:
-    let output =
-      arguments.output
-      ?? invokingUserHomeDirectory()
-      .appending(path: ".greenbubbles-acquire", directoryHint: .isDirectory)
-      .appending(path: "passphrase.txt")
+    guard let output = arguments.output else { throw CLIError.missingRequiredOption("--output") }
+    let binding = try resolveTarget(arguments)
     let preflight = runPreflight(
-      dbRootOption: arguments.dbRoot,
+      binding: binding,
       includePaths: arguments.includePaths
     )
     guard preflight.report.ready else {
@@ -452,8 +462,8 @@ do {
       }
       exit(1)
     }
-    let root = try resolveDatabaseRoot(arguments.dbRoot)
-    let inventory = try DatabaseSaltInventory(root: root)
+    try binding.assertStillBound()
+    let inventory = try DatabaseSaltInventory(root: binding.databaseRoot)
     printNote(
       "why this step: the passphrase only crosses the system key-derivation "
         + "function while WeChat opens its databases at login, so a fresh "
@@ -464,20 +474,23 @@ do {
     var capture = LLDBPassphraseCapture()
     capture.verbose = arguments.verbose
     capture.candidateValidator = { candidate in
-      try verifyPassphrase(candidate, inventory: inventory) > 0
+      guard !inventory.distinctSalts.isEmpty else { return false }
+      return try verifyPassphrase(candidate, inventory: inventory) == inventory.distinctSalts.count
     }
     capture.outputHandler = { message in
       FileHandle.standardError.write(Data("note: \(message)\n".utf8))
     }
     let started = Date()
-    let passphrase = try capture.capture(timeoutSeconds: arguments.timeoutSeconds)
+    let passphrase = try capture.capture(binding: binding, timeoutSeconds: arguments.timeoutSeconds)
     let captureDurationSeconds = Date().timeIntervalSince(started)
     let verifiedSaltCount = try verifyPassphrase(passphrase, inventory: inventory)
-    guard verifiedSaltCount > 0 else {
+    guard !inventory.distinctSalts.isEmpty, verifiedSaltCount == inventory.distinctSalts.count
+    else {
       throw CLIError.verificationFailed(
-        "the captured bytes verified against no database; nothing was written"
+        "the captured bytes did not verify every database salt; nothing was written"
       )
     }
+    try binding.assertStillBound()
     try SecretOutputWriter().write(passphrase, to: output, overwrite: arguments.overwrite)
     if arguments.json {
       try printJSON(
@@ -538,6 +551,9 @@ do {
     }
     if !allVerified { exit(1) }
   }
+} catch let error as ProcessBindingError {
+  printError(error.description)
+  exit(error == .ambiguousTargets ? 3 : 4)
 } catch {
   printError(String(describing: error))
   printError("Run greenbubbles-acquire help for usage.")

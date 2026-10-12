@@ -20,8 +20,8 @@ public enum SecretOutputError: Error, Equatable, CustomStringConvertible {
 /// The only egress point for a captured passphrase: writes exactly 64
 /// lowercase hexadecimal characters plus a trailing newline to an
 /// owner-specified file. The parent directory is created or enforced to mode
-/// 0700, the file is mode 0600, and creation is exclusive (`O_CREAT | O_EXCL`,
-/// failing rather than overwriting) unless `overwrite` is set.
+/// 0700 and the file is mode 0600. A staged, synchronized file is published
+/// exclusively, or atomically replaces the destination when overwrite is requested.
 public struct SecretOutputWriter: Sendable {
   public init() {}
 
@@ -34,18 +34,17 @@ public struct SecretOutputWriter: Sendable {
     try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
     try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: parent.path)
 
-    var flags = O_WRONLY | O_CREAT | O_CLOEXEC | O_NOFOLLOW
-    if overwrite {
-      flags |= O_TRUNC
-    } else {
-      flags |= O_EXCL
-    }
-    let descriptor = Darwin.open(url.path, flags, 0o600)
+    // Publish only a fully written file. A failed write must not truncate an old key.
+    let temporary = parent.appendingPathComponent(".greenbubbles-key-" + UUID().uuidString)
+    let descriptor = Darwin.open(
+      temporary.path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0o600)
     guard descriptor >= 0 else {
-      if errno == EEXIST, !overwrite { throw SecretOutputError.outputExists }
-      throw SecretOutputError.posix(operation: "open passphrase output", code: errno)
+      throw SecretOutputError.posix(operation: "create private key staging file", code: errno)
     }
-    defer { Darwin.close(descriptor) }
+    defer {
+      Darwin.close(descriptor)
+      Darwin.unlink(temporary.path)
+    }
     guard Darwin.fchmod(descriptor, 0o600) == 0 else {
       throw SecretOutputError.posix(operation: "restrict passphrase output", code: errno)
     }
@@ -63,7 +62,16 @@ public struct SecretOutputWriter: Sendable {
         written += count
       }
     }
-    Darwin.fsync(descriptor)
+    guard Darwin.fsync(descriptor) == 0 else {
+      throw SecretOutputError.posix(operation: "sync passphrase output", code: errno)
+    }
+    // link is exclusive; rename atomically replaces a directory entry, never follows a symlink.
+    let result =
+      overwrite ? Darwin.rename(temporary.path, url.path) : Darwin.link(temporary.path, url.path)
+    guard result == 0 else {
+      if errno == EEXIST, !overwrite { throw SecretOutputError.outputExists }
+      throw SecretOutputError.posix(operation: "publish passphrase output", code: errno)
+    }
   }
 
   private static func hexPayload(of secret: PassphraseSecret) -> [UInt8] {

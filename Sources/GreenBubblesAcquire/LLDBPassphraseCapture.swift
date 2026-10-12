@@ -47,10 +47,8 @@ public enum CaptureError: Error, Equatable, CustomStringConvertible {
 /// resume capture within the same deadline.
 /// Only the child process spawned here is ever terminated — never `pkill`.
 ///
-/// Diagnostics the original Python tool lacks: an attach failure fails fast
-/// instead of stalling until the timeout, and if WeChat's logout flow restarts
-/// its main process, the capture re-attaches to the new process within the
-/// same overall timeout.
+/// Attachment failures and target exits stop this attempt. No replacement
+/// process is discovered or attached automatically.
 public struct LLDBPassphraseCapture: Sendable {
   public static let defaultTimeoutSeconds = 300
 
@@ -64,12 +62,11 @@ public struct LLDBPassphraseCapture: Sendable {
     FileManager.default.isExecutableFile(atPath: lldbPath)
   }
 
-  /// Called with human-readable capture events (attach, re-attach, failure
-  /// hints) and, when `verbose` is set, lldb's own output as it arrives.
+  /// Called with human-readable capture events (startup, rejection, failure
+  /// hints) and, when verbose is set, notices that debugger output arrived.
   public var outputHandler: (@Sendable (String) -> Void)?
 
-  /// Mirrors lldb's raw output through `outputHandler` (lines may be split
-  /// arbitrarily; intended for diagnosing a stalled capture).
+  /// Reports debugger output activity without relaying its potentially sensitive text.
   public var verbose = false
 
   /// Required database verifier. False resumes capture; errors abort without saving.
@@ -79,41 +76,30 @@ public struct LLDBPassphraseCapture: Sendable {
     outputHandler?(message)
   }
 
-  /// Resolves the WeChat process itself and re-attaches if the target exits
-  /// mid-capture (WeChat can restart its main process during logout/login).
+  /// Capture only the bound process. Exit or identity changes require a new invocation.
   public func capture(
+    binding: ProcessTargetBinding,
     architecture: LLDBTargetArchitecture = .current,
     timeoutSeconds: Int = LLDBPassphraseCapture.defaultTimeoutSeconds
   ) throws -> PassphraseSecret {
     guard lldbAvailable else { throw CaptureError.lldbUnavailable }
-    let deadline = Date().addingTimeInterval(TimeInterval(timeoutSeconds))
-    while true {
-      guard let processID = try? WeChatProcessLocator().processIDs().first else {
-        if Date() < deadline {
-          Thread.sleep(forTimeInterval: 1)
-          continue
-        }
-        throw CaptureError.noWeChatProcess
-      }
-      emit("attaching to WeChat process \(processID)")
-      do {
-        return try runSingleCapture(
-          processID: processID,
-          architecture: architecture,
-          deadline: deadline
-        )
-      } catch CaptureError.targetExited {
-        guard Date() < deadline else { throw CaptureError.timedOut }
-        emit("WeChat process \(processID) exited; waiting to re-attach to the new process")
-        Thread.sleep(forTimeInterval: 1)
-      }
-    }
+    try binding.assertStillBound()
+    emit("starting debugger for the explicitly bound process")
+    let secret = try runSingleCapture(
+      processID: binding.processID,
+      architecture: architecture,
+      deadline: Date().addingTimeInterval(TimeInterval(timeoutSeconds)),
+      binding: binding
+    )
+    try binding.assertStillBound()
+    return secret
   }
 
   func runSingleCapture(
     processID: pid_t,
     architecture: LLDBTargetArchitecture,
-    deadline: Date
+    deadline: Date,
+    binding: ProcessTargetBinding? = nil
   ) throws -> PassphraseSecret {
     guard let candidateValidator else { throw CaptureError.verifierRequired }
     let script = LLDBCaptureScript.script(processID: processID, architecture: architecture)
@@ -139,6 +125,7 @@ public struct LLDBPassphraseCapture: Sendable {
       }
     }
 
+    try binding?.assertStillBound()
     do {
       try process.run()
     } catch {
@@ -166,6 +153,7 @@ public struct LLDBPassphraseCapture: Sendable {
 
     // Keep stdin open after writing the script: lldb must not read EOF while
     // it waits for the breakpoint to hit.
+    try binding?.assertStillBound()
     input.fileHandleForWriting.write(Data(script.utf8))
 
     while Date() < deadline {
@@ -185,9 +173,8 @@ public struct LLDBPassphraseCapture: Sendable {
         input.fileHandleForWriting.write(Data("process continue\n".utf8))
         continue
       }
-      if let detail = LLDBOutputParser.detectAttachFailure(in: current) {
-        emit("lldb reported: \(detail)")
-        throw CaptureError.attachFailed(detail)
+      if LLDBOutputParser.detectAttachFailure(in: current) != nil {
+        throw CaptureError.attachFailed("the debugger rejected the attachment")
       }
       if LLDBOutputParser.detectTargetExit(in: current) {
         throw CaptureError.targetExited
@@ -263,13 +250,9 @@ public struct LLDBPassphraseCapture: Sendable {
     }
 
     private func redact(_ line: String) -> String {
-      let trimmed = line.trimmingCharacters(in: .whitespaces)
-      if LLDBOutputParser.isByteLine(trimmed)
-        || (trimmed.hasPrefix("0x") && trimmed.contains(": 0x"))
-      {
-        return "<hexdump redacted>"
-      }
-      return line
+      // Debugger diagnostics can contain arbitrary memory, not only recognized hexdumps.
+      // Keep verbose progress useful without relaying untrusted debugger text.
+      return "<debugger output suppressed>"
     }
   }
 }
