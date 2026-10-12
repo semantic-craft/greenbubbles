@@ -18,11 +18,18 @@ public enum ProcessLocatorError: Error, Equatable, CustomStringConvertible {
 public struct WeChatProcessLocator: Sendable {
   public init() {}
 
-  public func processIDs() throws -> [pid_t] {
+  public func uniqueProcessID(exactName: String = "WeChat") throws -> pid_t {
+    let candidates = try processIDs(exactName: exactName)
+    guard !candidates.isEmpty else { throw CaptureError.noWeChatProcess }
+    guard candidates.count == 1 else { throw ProcessBindingError.ambiguousTargets }
+    return candidates[0]
+  }
+
+  public func processIDs(exactName: String = "WeChat") throws -> [pid_t] {
     let process = Process()
     let output = Pipe()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
-    process.arguments = ["-x", "WeChat"]
+    process.arguments = ["-x", exactName]
     process.standardOutput = output
     process.standardError = Pipe()
     do {
@@ -36,7 +43,10 @@ public struct WeChatProcessLocator: Sendable {
       throw ProcessLocatorError.commandFailed("pgrep")
     }
     // pgrep exits 1 when no process matched; that is an empty result, not an error.
-    guard process.terminationStatus == 0 else { return [] }
+    if process.terminationStatus == 1 { return [] }
+    guard process.terminationStatus == 0 else {
+      throw ProcessLocatorError.commandFailed("pgrep")
+    }
     guard let text = String(data: data, encoding: .utf8) else {
       throw ProcessLocatorError.commandFailed("pgrep")
     }

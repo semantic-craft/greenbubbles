@@ -111,8 +111,8 @@ account's key, which it copies from your running WeChat app one time.
 
 Do not re-sign your primary WeChat application. A live 4.1.15 signing attempt
 caused a launch failure. The [key setup guide](docs/PASSPHRASE_ACQUISITION.md)
-describes the current blocker and how to verify an existing key. The key is saved to
-`~/.greenbubbles-acquire/passphrase.txt`, a file only your account can read.
+describes the current blocker and how to verify an existing key. New captures
+require an explicit target and a separate private output path for each account.
 
 After that, commands work with no extra arguments: they find your WeChat data
 and key on their own. You need a [query profile](docs/QUERY_PROFILES.md) only

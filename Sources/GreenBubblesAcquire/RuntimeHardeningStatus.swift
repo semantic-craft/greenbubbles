@@ -15,9 +15,10 @@ public enum ProcessHardeningStatus: String, Codable, Sendable {
 /// rather than throwing; the on-disk signature evidence in
 /// `WeChatClientBuildInspector` remains the authoritative check.
 public enum RuntimeHardeningProbe {
-  // From <sys/codesign.h>: CS_OPS_STATUS and CS_HARD.
+  // Apple xnu osfmk/kern/cs_blobs.h: CS_HARD and CS_RUNTIME are distinct.
+  // Refuse either protection; absence still does not prove debugger access.
   private static let csOpsStatus: UInt32 = 0
-  private static let csHard: UInt32 = 0x100
+  private static let captureBlockingFlags: UInt32 = 0x100 | 0x10000
 
   private typealias CSOpsFunction =
     @convention(c) (
@@ -33,6 +34,6 @@ public enum RuntimeHardeningProbe {
     var flags: UInt32 = 0
     let result = function(processID, csOpsStatus, &flags, MemoryLayout<UInt32>.size)
     guard result == 0 else { return .unknown }
-    return (flags & csHard) != 0 ? .hardened : .notHardened
+    return (flags & captureBlockingFlags) != 0 ? .hardened : .notHardened
   }
 }

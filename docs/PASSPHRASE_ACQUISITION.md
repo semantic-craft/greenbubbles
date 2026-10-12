@@ -45,16 +45,18 @@ change WeChat or prove history/media completeness.
 `greenbubbles-acquire preflight` reports whether the current process can use
 the existing capture path. When blocked, stop; no signing operation is part
 of the CLI. When acquisition has independently been made safe, the owner
-starts `capture`, waits for the attach event, then handles logout/login.
+starts `capture` and handles logout/login within that approved capture window.
 Candidates are verified before being written to a private file. A successful
 capture must still be followed by full `verify` and a bounded reader check.
 
 ## Command options
 
 ```sh
-greenbubbles-acquire preflight [--json] [--db-root <path>]
-greenbubbles-acquire capture [--output <path>] [--timeout-seconds 300] \
-  [--db-root <path>] [--overwrite]
+greenbubbles-acquire preflight --pid <pid> --executable-path <executable> \
+  --db-root <db_storage> [--uid <owner-uid>] [--json]
+greenbubbles-acquire capture --pid <pid> --executable-path <executable> \
+  --db-root <db_storage> --output <private-key-file> \
+  [--uid <owner-uid>] [--timeout-seconds 300] [--overwrite]
 greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
 ```
 
@@ -64,13 +66,20 @@ greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
   capture. `--json` prints the report as JSON.
 - **`capture`** runs the same checks, then waits for you to log out and back
   in. `--timeout-seconds` changes the 300-second wait. `--output` saves the key
-  somewhere other than `~/.greenbubbles-acquire/passphrase.txt`. It never
+  to an explicit account-specific private file. It never
   replaces an existing key file unless you add `--overwrite`.
 - **`verify`** checks a saved key against your databases without touching
   WeChat. Pipe the key file into it. Use it after WeChat creates new database
   files; the same key opens them, so you don't need to capture again.
-- **`--db-root`** points at a specific WeChat data folder. Normally the tool
-  picks the account whose data was written most recently.
+- **Target binding:** `--pid`, `--executable-path`, and `--db-root` are required
+  for capture and preflight. `--uid` defaults to the invoking user (`SUDO_UID`
+  when using sudo). The process start time and actual open database root are
+  checked before capture and again before writing. Missing, ambiguous, or
+  mismatched observations block capture; there is no mtime fallback.
+- **`--verbose`** reports debugger activity without relaying raw debugger text.
+- **Exit codes:** binding errors return 4; invalid/missing options return 2;
+  a blocked readiness report returns 1. No anonymous process discovery is used
+  by the capture CLI.
 
 The WeChat version is shown for information only. The tool does not refuse a
 version it hasn't seen, but it has only been tested on WeChat 4.1.12 and 4.1.13.
@@ -81,9 +90,10 @@ The capture breakpoint filters for SQLCipher 4 PBKDF2 parameters (32-byte
 password, 16-byte salt, SHA512, 256000 rounds). A parameter match is only a
 candidate: the capture loop verifies it against the inventoried database
 page-1 HMACs before detaching. A rejected candidate resumes the process and
-continues within the original timeout, including across process restarts.
-No unverified candidate is saved. Final verification still reports how many
-inventoried salts were covered; use `verify` to require complete coverage.
+continues within the original timeout on the same process. Process exit ends
+that attempt; it never follows another PID. A candidate must verify every
+inventoried distinct salt before it can be saved. Follow up with `verify` for
+an independent coverage check.
 
 This addresses the premature-candidate failure described in upstream issue
 #20. Automated process-loop and cryptographic tests do not establish live
@@ -108,9 +118,11 @@ left with no key file rather than a wrong one.
 
 ## Where the key is saved
 
-The key is saved as 64 hexadecimal characters in
-`~/.greenbubbles-acquire/passphrase.txt`. The file can be read only by your
-account (mode `0600`, in a `0700` folder). It is not encrypted; those file
+The key is saved as 64 hexadecimal characters at the explicit `--output` path.
+Use a separate path per account. The file has mode `0600` in a `0700` folder;
+when running capture as root, ownership must be transferred to the intended
+reader account before normal-user queries can use it. A staged file is fully
+written and synchronized before exclusive publication or atomic replacement. It is not encrypted; those file
 permissions are what protect it. The key never appears on the command line, in
 a report, or in a log.
 
@@ -147,12 +159,13 @@ it is why you have to log out and back in.
 1. Attaches Apple's `lldb` debugger to WeChat and pauses on
    `CCKeyDerivationPBKDF` only when the password passed to it is exactly 32
    bytes long.
-2. When you log back in, it reads those 32 bytes once (from register `x1` on
-   Apple silicon, `rsi` on Intel), then detaches. It reads nothing else and
-   changes nothing in WeChat. Because it pauses on a macOS function rather than
-   on WeChat's own code, it does not depend on a particular WeChat version.
-3. On WeChat 4.1.13, logging out ends the WeChat process and logging in starts
-   a new one. The tool notices and follows the new process.
+2. At a matching key-derivation call, it reads a 32-byte candidate (from register
+   `x1` on Apple silicon, `rsi` on Intel). Rejected candidates resume the target;
+   accepted candidates detach. Debugging pauses the selected process, and use
+   of a system function does not establish compatibility with every client build.
+3. If logout restarts the process, this attempt stops. A new explicitly bound
+   invocation is required. Whether a safe capture window remains available
+   after such a restart needs separate live validation.
 4. For each database file, it computes the file's key on your Mac
    (PBKDF2-HMAC-SHA512, 256,000 rounds, with that file's 16-byte salt).
 5. It proves each computed key is correct by checking SQLCipher 4's
