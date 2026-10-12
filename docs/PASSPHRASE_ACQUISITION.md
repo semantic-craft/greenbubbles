@@ -20,7 +20,12 @@ changing the application. The capture implementation still needs debugger
 access and a fresh login. A protected official client is therefore a blocker,
 not an instruction to modify its signature. A root-only task-port probe can
 check access without reading memory, stopping the app, or setting breakpoints;
-a successful probe alone does not prove acquisition works.
+a successful probe alone does not prove acquisition works. On the restored
+official WeChat 4.1.15 build 270134, both ordinary-user and root probes
+returned `KERN_FAILURE` (5). The root report confirmed `memoryRead: false`
+and `targetPaused: false`; the official signature still passed deep strict
+verification and the same client process remained running. Repeating the
+probe with administrator privileges is not a remedy for this observed blocker.
 
 No isolated-copy acquisition procedure is accepted yet. A copied executable
 can still share an account container with the main application; copying it
