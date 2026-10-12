@@ -10,24 +10,32 @@ struct LLDBCaptureScriptTests {
     "breakpoint set -n CCKeyDerivationPBKDF",
     "breakpoint command add 1",
     "memory read --size 1 --count 32 --format x",
-    "detach",
-    "quit",
     "DONE",
     "process continue",
   ]
 
   @Test func arm64ScriptUsesArgumentRegistersInProvenOrder() {
     let script = LLDBCaptureScript.script(processID: 4242, architecture: .arm64)
-    #expect(script.contains("breakpoint set -n CCKeyDerivationPBKDF -c '$x2 == 32'"))
+    #expect(
+      script.contains(
+        "breakpoint set -n CCKeyDerivationPBKDF -c '$x0 == 2 && $x2 == 32 && $x4 == 16 && $x5 == 5 && $x6 == 256000'"
+      ))
     #expect(script.contains("memory read --size 1 --count 32 --format x $x1"))
     #expect(script.hasSuffix("process continue\n"))
+    #expect(!script.contains("detach"))
+    #expect(!script.contains("quit"))
     assertProvenOrdering(in: script)
   }
 
   @Test func x86_64ScriptUsesArgumentRegistersInProvenOrder() {
     let script = LLDBCaptureScript.script(processID: 4242, architecture: .x86_64)
-    #expect(script.contains("breakpoint set -n CCKeyDerivationPBKDF -c '$rdx == 32'"))
+    #expect(
+      script.contains(
+        "breakpoint set -n CCKeyDerivationPBKDF -c '$rdi == 2 && $rdx == 32 && $r8 == 16 && $r9 == 5 && *(unsigned int *)($rsp + 8) == 256000'"
+      ))
     #expect(script.contains("memory read --size 1 --count 32 --format x $rsi"))
+    #expect(!script.contains("detach"))
+    #expect(!script.contains("quit"))
     assertProvenOrdering(in: script)
   }
 

@@ -461,6 +461,9 @@ do {
     printNote("waiting up to \(arguments.timeoutSeconds) seconds for the login")
     var capture = LLDBPassphraseCapture()
     capture.verbose = arguments.verbose
+    capture.candidateValidator = { candidate in
+      try verifyPassphrase(candidate, inventory: inventory) > 0
+    }
     capture.outputHandler = { message in
       FileHandle.standardError.write(Data("note: \(message)\n".utf8))
     }

@@ -91,6 +91,21 @@ greenbubbles-acquire verify --passphrase-stdin [--db-root <path>]
 The WeChat version is shown for information only. The tool does not refuse a
 version it hasn't seen, but it has only been tested on WeChat 4.1.12 and 4.1.13.
 
+## Candidate validation
+
+The capture breakpoint filters for SQLCipher 4 PBKDF2 parameters (32-byte
+password, 16-byte salt, SHA512, 256000 rounds). A parameter match is only a
+candidate: the capture loop verifies it against the inventoried database
+page-1 HMACs before detaching. A rejected candidate resumes the process and
+continues within the original timeout, including across process restarts.
+No unverified candidate is saved. Final verification still reports how many
+inventoried salts were covered; use `verify` to require complete coverage.
+
+This addresses the premature-candidate failure described in upstream issue
+#20. Automated process-loop and cryptographic tests do not establish live
+compatibility with every WeChat 4.1.15 build. A real capture, full inventory
+verification, and bounded message read remain the acceptance steps.
+
 ## If something goes wrong
 
 The capture never saves a key it could not verify. If anything fails, you are
