@@ -463,3 +463,19 @@ Contacts and attachments work the same way, with one important limit:
 None of this relaxes the hard failures. Tampering with the key, account, or
 checkpoint, an unsafe path, or an authorization failure is an error, not a gap
 to work around.
+
+### System conversation names and coverage
+
+WeChat's subscription and service-account aggregate sessions may have no row
+in `contact.db`. The reader supplies the presentation names `订阅号` and
+`服务号` for those two known system identifiers, while preferring stored contact
+names. Unknown identifiers still produce unresolved-name warnings; unavailable
+contact databases still produce enrichment warnings.
+
+`coverageComplete` describes the current query, including contact enrichment;
+it does not prove that the Mac has every message ever sent. Inspect the specific
+warnings before attributing incomplete coverage to missing message shards.
+`page.hasMore` means another bounded page exists. `crossDatabaseAtomic: false`
+means separate live database reads do not share one transaction, not that history
+has been lost. Aggregate system sessions may return no message rows; query the
+individual account conversation for its locally available messages.
