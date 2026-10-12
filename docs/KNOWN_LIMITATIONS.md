@@ -6,11 +6,11 @@ belongs on your Mac. Where a limit has a number, the measurement is in
 
 ## Check these before you install
 
-**You need administrator access, and you must re-sign WeChat.** GreenBubbles
-can't read your chats without your account's key, and it has no way around the
-encryption. It copies the key from your own running WeChat, which needs `sudo`
-and a local re-signing of the WeChat app. If you can't use `sudo` on this Mac,
-you can't finish setup. See the [key setup guide](PASSPHRASE_ACQUISITION.md).
+**Acquisition is blocked on protected official clients.** Do not re-sign your
+primary WeChat application: an attempted deep ad-hoc signing on 4.1.15 caused
+a launch failure. A verified existing key can be used without modifying
+WeChat. An isolated acquisition alternative has not yet passed acceptance.
+See the [key setup guide](PASSPHRASE_ACQUISITION.md).
 
 **macOS 14 or later, on Apple silicon.** Released builds are Apple silicon only;
 Intel Macs aren't built or tested. There's no Windows, Linux, Android, or iOS

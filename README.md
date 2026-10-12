@@ -41,7 +41,8 @@ is no export step and no second copy to keep up to date. You can:
 - make an encrypted backup you can open later, even without WeChat.
 
 **Research alpha. Needs a Mac with Apple silicon and macOS 14 or later.**
-Setup copies a key out of your own WeChat app, which needs administrator access.
+Reading requires a verified local database key. This fork does not recommend
+re-signing the primary WeChat app; acquisition is currently a separate acceptance gate.
 Reading and searching happen entirely on your Mac. If you use a cloud AI, the
 messages it reads are sent to that AI's provider.
 
@@ -108,9 +109,9 @@ The app asks for this path the first time it runs.
 WeChat encrypts its chat databases. To read them, GreenBubbles needs your
 account's key, which it copies from your running WeChat app one time.
 
-This one-time setup needs administrator access and re-signs your copy of
-WeChat. The [key setup guide](docs/PASSPHRASE_ACQUISITION.md) has the steps and
-troubleshooting help. The key is saved to
+Do not re-sign your primary WeChat application. A live 4.1.15 signing attempt
+caused a launch failure. The [key setup guide](docs/PASSPHRASE_ACQUISITION.md)
+describes the current blocker and how to verify an existing key. The key is saved to
 `~/.greenbubbles-acquire/passphrase.txt`, a file only your account can read.
 
 After that, commands work with no extra arguments: they find your WeChat data

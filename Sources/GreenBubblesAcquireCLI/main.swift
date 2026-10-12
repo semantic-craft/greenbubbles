@@ -103,7 +103,9 @@ struct Arguments {
   }
 }
 
-private let resignRemediation = "sudo codesign --force --deep --sign - /Applications/WeChat.app"
+private let protectedClientRemediation =
+  "Preserve the official WeChat application. Use an existing verified key, "
+  + "or a separately validated acquisition environment; do not re-sign the primary app."
 
 private let usage = """
   Usage: greenbubbles-acquire <command> [options]
@@ -327,8 +329,8 @@ private func runPreflight(dbRootOption: URL?, includePaths: Bool) -> PreflightRe
     switch status {
     case .hardened:
       processLabel = "WeChat is running\(suffix), but Hardened Runtime is still active"
-      processHint = "re-sign the app, then restart WeChat:\n    \(resignRemediation)"
-      remediation = resignRemediation
+      processHint = protectedClientRemediation
+      remediation = protectedClientRemediation
     case .notHardened:
       processLabel = "WeChat is running\(suffix), Hardened Runtime removed"
       processHint = nil
