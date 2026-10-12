@@ -1612,6 +1612,7 @@ pub(crate) fn classify_contact_id(
     const SERVICE_IDENTIFIERS: &[&str] = &[
         "blogapp",
         "brandsessionholder",
+        "brandservicesessionholder",
         "facebookapp",
         "feedsapp",
         "filehelper",
@@ -1641,6 +1642,16 @@ pub(crate) fn classify_contact_id(
     }
 }
 
+// WeChat aggregate session rows are not necessarily present in contact.db.
+// Preserve names from the database when available; these are presentation fallbacks.
+fn system_conversation_display_name(identifier: &str) -> Option<&'static str> {
+    match identifier {
+        "brandsessionholder" => Some("订阅号"),
+        "brandservicesessionholder" => Some("服务号"),
+        _ => None,
+    }
+}
+
 fn contact_display_name(record: &ContactRecord, kind: ContactKind) -> String {
     if kind == ContactKind::AccountHolder {
         return "You".to_string();
@@ -1651,7 +1662,11 @@ fn contact_display_name(record: &ContactRecord, kind: ContactKind) -> String {
         .or(record.nickname.as_ref())
         .or(record.alias.as_ref())
         .cloned()
-        .unwrap_or_else(|| record.id.clone())
+        .unwrap_or_else(|| {
+            system_conversation_display_name(&record.id)
+                .unwrap_or(&record.id)
+                .to_string()
+        })
 }
 
 pub fn list_contacts(
@@ -5981,6 +5996,14 @@ fn resolve_contact_display_names<'b>(
     drop(statement);
     drop(connection);
 
+    for identifier in &query_identifiers {
+        if let Some(name) = system_conversation_display_name(identifier) {
+            display_names
+                .entry(identifier.clone())
+                .or_insert_with(|| name.to_string());
+        }
+    }
+
     let unresolved_count = requested_count.saturating_sub(display_names.len());
     let mut warnings = Vec::new();
     if row_read_failed {
@@ -7071,6 +7094,43 @@ mod tests {
             exact.item.sender_display_name.as_deref(),
             Some("Sender Remark")
         );
+    }
+
+    #[test]
+    fn system_conversation_names_do_not_report_missing_contact_coverage() {
+        let (_temp, root) = fixture();
+        let session = Connection::open(root.join("session/session.db")).unwrap();
+        session
+            .execute_batch(
+                "DELETE FROM SessionTable;
+             INSERT INTO SessionTable(username, sort_timestamp, summary) VALUES
+                ('brandsessionholder', 20, ''),
+                ('brandservicesessionholder', 10, '');",
+            )
+            .unwrap();
+        drop(session);
+        let source = LiveQuerySource::open(&root, QueryDatabaseAccess::Decrypted).unwrap();
+        let page = list_conversations(&source, 3, None).unwrap();
+        assert_eq!(page.items[0].display_name.as_deref(), Some("订阅号"));
+        assert_eq!(page.items[1].display_name.as_deref(), Some("服务号"));
+        assert!(page.consistency.coverage_complete);
+        assert!(page.warnings.is_empty());
+        assert!(!page.consistency.cross_database_atomic);
+        assert_eq!(
+            classify_contact_id("brandservicesessionholder", None, false, false),
+            ContactKind::Service
+        );
+
+        let contact = Connection::open(root.join("contact/contact.db")).unwrap();
+        contact
+            .execute(
+                "INSERT INTO contact(username, remark) VALUES (?1, ?2)",
+                params!["brandsessionholder", "Custom label"],
+            )
+            .unwrap();
+        drop(contact);
+        let page = list_conversations(&source, 3, None).unwrap();
+        assert_eq!(page.items[0].display_name.as_deref(), Some("Custom label"));
     }
 
     #[test]

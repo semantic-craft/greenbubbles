@@ -264,6 +264,11 @@ fn query_error_details(
             false,
         );
     }
+    if let Some(QueryProfileError::ActiveAccountUnavailable(message)) =
+        error.downcast_ref::<QueryProfileError>()
+    {
+        return ("activeAccountUnavailable", message, false);
+    }
     if error.downcast_ref::<QueryProfileError>().is_some() {
         return (
             "invalidProfile",
@@ -3965,6 +3970,30 @@ fn resolve_query_invocation(
 fn load_configured_query_invocation(
     requested_profile: Option<&str>,
 ) -> Result<(PathBuf, ResolvedQueryInvocation), Box<dyn std::error::Error>> {
+    if requested_profile.is_none() && load_query_settings()?.follow_active_account {
+        let settings = load_query_settings()?;
+        if settings.source_root.is_some()
+            || settings.passphrase_file.is_some()
+            || settings.default_profile.is_some()
+        {
+            return Err(
+                "follow_active_account cannot be combined with a pinned source or default profile"
+                    .into(),
+            );
+        }
+        let root = greenbubbles::query_profile::discover_active_live_source_root()?;
+        let (configuration_file, store) = QueryProfileStore::load_default()?;
+        let (name, profile) =
+            greenbubbles::query_profile::select_active_account_profile(&store, &root)?;
+        return Ok((
+            configuration_file,
+            ResolvedQueryInvocation {
+                source_root: root,
+                access: load_query_profile_access(profile)?,
+                profile_name: Some(name),
+            },
+        ));
+    }
     match QueryProfileStore::load_default() {
         Ok((configuration_file, store)) => {
             let (profile_name, profile) = store.select(requested_profile)?;

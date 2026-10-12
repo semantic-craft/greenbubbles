@@ -36,6 +36,8 @@ const MAXIMUM_PASSPHRASE_FILE_BYTES: u64 = 1_026;
 
 #[derive(Debug, Error)]
 pub enum QueryProfileError {
+    #[error("active WeChat account unavailable: {0}")]
+    ActiveAccountUnavailable(&'static str),
     #[error("query-profile path is unavailable: {0}")]
     Unavailable(String),
     #[error("unsafe query-profile path: {0}")]
@@ -334,6 +336,84 @@ pub fn discover_default_live_source_root() -> Result<PathBuf, QueryProfileError>
     Ok(path.clone())
 }
 
+/// Select only a uniquely observed live account; never infer it from timestamps.
+pub fn discover_active_live_source_root() -> Result<PathBuf, QueryProfileError> {
+    use std::process::Command;
+    let processes = Command::new("/bin/ps")
+        .args([
+            "-U",
+            &unsafe { libc::geteuid() }.to_string(),
+            "-o",
+            "pid=,comm=",
+        ])
+        .output()?;
+    let text = String::from_utf8_lossy(&processes.stdout);
+    let pids = text
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (pid, executable) = line.split_once(char::is_whitespace)?;
+            (executable.trim() == "/Applications/WeChat.app/Contents/MacOS/WeChat").then_some(pid)
+        })
+        .collect::<Vec<_>>();
+    if !processes.status.success() || pids.len() != 1 {
+        return Err(QueryProfileError::ActiveAccountUnavailable(
+            "active-account mode requires one running official WeChat; no account was selected",
+        ));
+    }
+    let files = Command::new("/usr/sbin/lsof")
+        .args(["-n", "-P", "-a", "-p", pids[0], "-Fn"])
+        .output()?;
+    if !files.status.success() {
+        return Err(QueryProfileError::ActiveAccountUnavailable(
+            "cannot inspect active WeChat database handles; no account was selected",
+        ));
+    }
+    let root = active_root_from_open_files(&String::from_utf8_lossy(&files.stdout))?;
+    if !is_usable_live_database_root(&root) {
+        return Err(QueryProfileError::ActiveAccountUnavailable(
+            "active WeChat database root is unavailable",
+        ));
+    }
+    Ok(root)
+}
+
+fn active_root_from_open_files(files: &str) -> Result<PathBuf, QueryProfileError> {
+    let mut roots = std::collections::BTreeSet::new();
+    for path in files.lines().filter_map(|line| line.strip_prefix('n')) {
+        if !(path.ends_with(".db") || path.ends_with(".db-wal") || path.ends_with(".db-shm")) {
+            continue;
+        }
+        if let Some((account, _)) = path.split_once("/db_storage/") {
+            if Path::new(account).is_absolute() {
+                roots.insert(Path::new(account).join("db_storage"));
+            }
+        }
+    }
+    if roots.len() != 1 {
+        return Err(QueryProfileError::ActiveAccountUnavailable("active account is not uniquely identifiable; wait until WeChat login finishes, or explicitly select a named profile"));
+    }
+    Ok(roots.into_iter().next().unwrap())
+}
+
+pub fn select_active_account_profile<'a>(
+    store: &'a QueryProfileStore,
+    root: &Path,
+) -> Result<(String, &'a QueryProfile), QueryProfileError> {
+    let matches = store
+        .profiles
+        .iter()
+        .filter(|(_, profile)| {
+            profile.source_root == root
+                && matches!(profile.access, QueryProfileAccess::LiveWeChatKeyFile(_))
+        })
+        .collect::<Vec<_>>();
+    if matches.len() != 1 {
+        return Err(QueryProfileError::ActiveAccountUnavailable("active account needs exactly one registered live profile with its own verified key; no other account or key was used"));
+    }
+    Ok((matches[0].0.clone(), matches[0].1))
+}
+
 fn current_user_home() -> Result<PathBuf, QueryProfileError> {
     let home = env::var_os("HOME")
         .filter(|value| !value.is_empty())
@@ -406,6 +486,7 @@ pub enum MessageOutputFormat {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QuerySettings {
     pub source_root: Option<PathBuf>,
+    pub follow_active_account: bool,
     pub passphrase_file: Option<PathBuf>,
     pub default_profile: Option<String>,
     pub message_format: MessageOutputFormat,
@@ -464,11 +545,16 @@ fn parse_query_settings(bytes: &[u8]) -> Result<QuerySettings, QueryProfileError
             .as_table()
             .ok_or_else(|| invalid_configuration("[source] must be a table"))?;
         for key in source.keys() {
-            if key != "root" && key != "passphrase_file" {
+            if key != "root" && key != "passphrase_file" && key != "follow_active_account" {
                 return Err(invalid_configuration(
-                    "[source] only accepts root and passphrase_file",
+                    "[source] only accepts root, passphrase_file, and follow_active_account",
                 ));
             }
+        }
+        if let Some(active) = source.get("follow_active_account") {
+            settings.follow_active_account = active.as_bool().ok_or_else(|| {
+                invalid_configuration("source.follow_active_account must be boolean")
+            })?;
         }
         if let Some(root) = source.get("root") {
             let root = required_settings_string(root, "source.root")?;
@@ -711,6 +797,61 @@ fn invalid_credential(reason: &str) -> QueryProfileError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn active_account_selection_never_falls_back_to_old_account() {
+        let a = PathBuf::from("/private/account-a/db_storage");
+        let b = PathBuf::from("/private/account-b/db_storage");
+        let mut store = QueryProfileStore {
+            schema: QUERY_PROFILE_SCHEMA.into(),
+            format_version: QUERY_PROFILE_FORMAT_VERSION,
+            default_profile: Some("a".into()),
+            profiles: BTreeMap::new(),
+        };
+        for (name, root) in [("a", &a), ("b", &b)] {
+            store.profiles.insert(
+                name.into(),
+                QueryProfile {
+                    source_root: root.clone(),
+                    access: QueryProfileAccess::LiveWeChatKeyFile(QueryCredentialFileAccess {
+                        credential_file: PathBuf::from(format!("/private/keys/{name}.key")),
+                    }),
+                },
+            );
+        }
+        let (name, selected) = select_active_account_profile(&store, &b).unwrap();
+        assert_eq!(name, "b");
+        assert_eq!(
+            selected.access.credential_file().unwrap(),
+            Path::new("/private/keys/b.key")
+        );
+        store.profiles.remove("b");
+        assert!(select_active_account_profile(&store, &b).is_err());
+        store
+            .profiles
+            .insert("duplicate".into(), store.profiles["a"].clone());
+        assert!(select_active_account_profile(&store, &a).is_err());
+    }
+
+    #[test]
+    fn active_account_handles_require_one_database_root() {
+        let a = "p123\nn/private/account-a/db_storage/session/session.db\nn/private/account-a/db_storage/message/message_0.db-wal\n";
+        assert_eq!(
+            active_root_from_open_files(a).unwrap(),
+            Path::new("/private/account-a/db_storage")
+        );
+        assert!(active_root_from_open_files("p123\nn/private/attachment.jpg\n").is_err());
+        assert!(active_root_from_open_files(&format!(
+            "{a}n/private/account-b/db_storage/contact/contact.db\n"
+        ))
+        .is_err());
+        assert!(
+            parse_query_settings(b"[source]\nfollow_active_account = true")
+                .unwrap()
+                .follow_active_account
+        );
+        assert!(parse_query_settings(b"[source]\nfollow_active_account = 'yes'").is_err());
+    }
 
     #[test]
     fn strict_schema_rejects_unknown_fields_and_unsafe_names() {
