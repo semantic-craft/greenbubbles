@@ -479,3 +479,25 @@ warnings before attributing incomplete coverage to missing message shards.
 means separate live database reads do not share one transaction, not that history
 has been lost. Aggregate system sessions may return no message rows; query the
 individual account conversation for its locally available messages.
+
+### Switching logged-in accounts on one Mac
+
+For an account-switching installation, set `[source] follow_active_account = true`
+in the private settings file, with no pinned `root`, `passphrase_file`, or default
+profile. Register each account separately in the existing private
+`query-profiles.json`: its exact `sourceRoot` and a `liveWeChatKeyFile` access entry
+with its own owner-only `credentialFile`. Keep a separately verified copy of each
+account key; do not point all profiles at capture's overwriteable default file.
+
+In this opt-in mode, ordinary queries inspect open database handles of the single
+running `/Applications/WeChat.app/Contents/MacOS/WeChat` process. They select only
+a unique registered live profile matching that database root. Logged out, closed,
+ambiguous, or unregistered accounts stop the query; timestamps and the previous
+account's default profile are never fallback choices. This does not sign, restart,
+or modify WeChat. Explicit `--profile` or explicit source access still intentionally
+selects that account's local history, even when it is not currently logged in.
+
+Account selection is observed at query start, not an atomic lock on WeChat login.
+A query already in progress retains its selected source; issue a new query after
+switching accounts. Second-account live acceptance requires that account to be
+logged in and its own key verified; synthetic routing tests do not establish it.
