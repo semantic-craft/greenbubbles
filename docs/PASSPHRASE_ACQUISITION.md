@@ -88,7 +88,9 @@ inventoried salts were covered; use `verify` to require complete coverage.
 This addresses the premature-candidate failure described in upstream issue
 #20. Automated process-loop and cryptographic tests do not establish live
 compatibility with every WeChat 4.1.15 build. A real capture, full inventory
-verification, and bounded message read remain the acceptance steps.
+verification, and bounded message read remain the acceptance steps for each
+new environment. The 4.1.15 observation below used the unmodified upstream
+capture executable; it does not validate this fork's changed capture loop.
 
 ## If something goes wrong
 
@@ -164,6 +166,22 @@ GreenBubbles features that don't read live WeChat data, such as opening an
 existing backup, never use this capture.
 
 ## What has been tested
+
+- **2026-10-12, WeChat 4.1.15 build 270134, macOS 27.0.1:** an owner-operated
+  comparison captured a passphrase in about 14.5 seconds from a temporary
+  deep ad-hoc-signed application copy, using unmodified upstream acquisition
+  at `69f19c7`. All 20 inventoried databases verified, and the reader returned
+  a bounded conversation page. Subsequent verification still passed 20/20;
+  a bounded sample returned three actual messages from one conversation.
+  Conversation listing reported `contactDisplayNameUnresolved`, so display
+  name coverage is not complete. The official primary application's deep
+  strict signature verification passed and its login window opened afterward;
+  normal signed-in GUI acceptance remains owner-dependent. The temporary
+  copy shared the existing account container; it was not a data-isolated
+  environment. The earlier launch failure's root cause remains unproven.
+  In the same comparison, wx-cli-again at `077a54c` acquired one database key,
+  reported six missing critical shards, and failed to decrypt `session.db`.
+  Its successful init/doctor exit codes did not establish reader readiness.
 
 - **2026-08-27, WeChat 4.1.12:** a test with made-up data reproduced the read
   and key computation exactly. Then a real capture on the author's own Mac and
