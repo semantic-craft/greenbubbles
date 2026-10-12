@@ -175,8 +175,9 @@ existing backup, never use this capture.
   a bounded sample returned three actual messages from one conversation.
   Conversation listing reported `contactDisplayNameUnresolved`, so display
   name coverage is not complete. The official primary application's deep
-  strict signature verification passed and its login window opened afterward;
-  normal signed-in GUI acceptance remains owner-dependent. The temporary
+  strict signature verification passed. The owner subsequently confirmed
+  that the official application was signed in and usable; verification still
+  passed 20/20 with that application running. The temporary
   copy shared the existing account container; it was not a data-isolated
   environment. The earlier launch failure's root cause remains unproven.
   In the same comparison, wx-cli-again at `077a54c` acquired one database key,
