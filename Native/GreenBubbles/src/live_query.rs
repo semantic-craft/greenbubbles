@@ -196,13 +196,13 @@ impl<'a> LiveQuerySource<'a> {
         let connection = match self.access {
             QueryDatabaseAccess::LiveEncrypted(key) => {
                 wx_db::open_readonly_connection(&path, Some(key))
-                    .map_err(|error| database_error(&error.to_string()))?
+                    .map_err(|error| open_failure(&path, &error.to_string()))?
             }
             QueryDatabaseAccess::SnapshotEncrypted(key) => {
                 open_snapshot_readonly_connection(&path, key)?
             }
             QueryDatabaseAccess::Decrypted => wx_db::open_readonly_connection(&path, None)
-                .map_err(|error| database_error(&error.to_string()))?,
+                .map_err(|error| open_failure(&path, &error.to_string()))?,
         };
         connection
             .busy_timeout(SQLITE_BUSY_TIMEOUT)
@@ -6443,6 +6443,24 @@ fn now_unix_milliseconds() -> u64 {
         .min(u64::MAX as u128) as u64
 }
 
+/// An open failure caused by macOS privacy controls (EPERM/EACCES on the
+/// WeChat container) is not a wrong key. Report it as a permission problem so
+/// nobody re-captures a key that was fine.
+fn open_failure(path: &Path, message: &str) -> LiveQueryError {
+    if let Err(error) = fs::File::open(path) {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            return permission_denied_error();
+        }
+    }
+    database_error(message)
+}
+
+fn permission_denied_error() -> LiveQueryError {
+    LiveQueryError::UnsafeSource(
+        "macOS denied read access to the WeChat data folder (Operation not permitted); grant Full Disk Access to the app that runs greenbubbles. This is not a key problem".into(),
+    )
+}
+
 fn database_error(message: &str) -> LiveQueryError {
     let lower = message.to_ascii_lowercase();
     let safe = if lower.contains("key") || lower.contains("encrypt") {
@@ -6458,6 +6476,24 @@ fn database_error(message: &str) -> LiveQueryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unreadable_database_reports_permission_not_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("message_0.db");
+        fs::write(&path, b"x").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable_anyway = fs::File::open(&path).is_ok(); // root ignores mode bits
+        let error = open_failure(&path, "file is not a database: key").to_string();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        if !readable_anyway {
+            assert!(error.contains("not a key problem"), "{error}");
+            assert!(!error.contains("access material"));
+        }
+        let readable = open_failure(&path, "file is not a database: key").to_string();
+        assert!(readable.contains("supplied access material"));
+    }
 
     #[test]
     fn brief_text_keeps_words_and_drops_markup_and_identifiers() {
