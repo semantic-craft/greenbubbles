@@ -8,3 +8,4 @@ Read before changing code here. Keep this file short; it only points elsewhere.
 - Multiple accounts / follow the logged-in account: [docs/FAQ.md](docs/FAQ.md) and [docs/QUERY_PROFILES.md](docs/QUERY_PROFILES.md).
 - Rust core: `Native/GreenBubbles` (`cargo test --release --lib`). Swift acquire: `Sources/`, `Tests/`.
 - Never print, log, or copy keys off the machine. Never send WeChat messages from tests.
+- Cleaning up / reporting state of acquire & comparison artifacts: enumerate from `scripts/gb_residue_report.py` (declared `STATE_ROOTS`), never guessed paths or wildcards; enforced by `scripts/test_gb_residue_report.py`. Never claim "clean" without this inventory.
